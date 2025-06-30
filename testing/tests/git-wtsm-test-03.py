@@ -16,7 +16,8 @@ class WorktreeListTests(unittest.TestCase):
     
     def setUp(self):
         """Set up test environment."""
-        self.test_repo = pathlib.Path("/home/testuser/test-repos/scenarios/initialized-main-repo")
+        # Use simple repo to avoid Docker hardlink issues for list functionality testing
+        self.test_repo = pathlib.Path("/home/testuser/test-repos/scenarios/simple-repo")
         self.original_dir = pathlib.Path.cwd()
         os.chdir(self.test_repo)
         
