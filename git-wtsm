@@ -115,6 +115,14 @@ def confirm_force_removal() -> None:
         print("Aborted by user.")
         sys.exit(1)
 
+def init_submodules_recursive(worktree_path: pathlib.Path) -> None:
+    """Initialize and update submodules recursively in worktree."""
+    submodules = get_submodules()
+    if submodules:
+        print(f"Initializing {len(submodules)} submodules recursively...")
+        safe_run("git submodule update --init --recursive", 
+                cwd=worktree_path, capture=False)
+
 def cmd_add(path: pathlib.Path, branch: str | None) -> None:
     """Add a new worktree at [path], optionally on [branch]."""
     args = ["git", "worktree", "add"]
@@ -123,6 +131,9 @@ def cmd_add(path: pathlib.Path, branch: str | None) -> None:
     args.append(str(path))
     safe_run(args, capture=False)
     print(f"Worktree added at {path}")
+    
+    # Initialize submodules according to gitlink information
+    init_submodules_recursive(path)
 
 def cmd_remove(path: pathlib.Path, force: bool) -> None:
     """Remove a worktree at [path], with optional force."""
