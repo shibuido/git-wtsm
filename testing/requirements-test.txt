@@ -1,0 +1,12 @@
+# Python testing dependencies for git-wtsm
+pytest==7.4.3
+pytest-asyncio==0.21.1
+pytest-cov==4.1.0
+testcontainers==3.7.1
+
+# Test utilities
+colorama==0.4.6
+termcolor==2.3.0
+
+# Git interaction (for advanced test scenarios)
+GitPython==3.1.40

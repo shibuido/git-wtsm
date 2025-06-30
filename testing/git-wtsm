@@ -1,0 +1,249 @@
+#!/usr/bin/env python3
+"""
+git-wtsm: Git worktree/submodule manager.
+
+CORE FUNCTIONS STRUCTURE:
+- All functions are single-purpose, under ~15 LOC, and rely on a safe subprocess wrapper for Git interaction.
+- Each function is responsible for a specific check, assertion, or Git operation, and is invoked by the main command dispatcher.
+- The CLI is implemented with argparse, and the script is self-contained, using only standard library modules.
+"""
+
+from __future__ import annotations
+
+import argparse
+import subprocess
+import pathlib
+import sys
+import textwrap
+
+def safe_run(cmd: list[str] | str,
+             cwd: pathlib.Path | None = None,
+             *,
+             capture: bool = True) -> subprocess.CompletedProcess:
+    """
+    Thin wrapper around subprocess.run adding nice error messages
+    and automatic command echoing.
+    """
+    if isinstance(cmd, str):
+        cmd = cmd.split()
+    result = subprocess.run(
+        cmd,
+        cwd=cwd,
+        capture_output=capture,
+        text=True,
+        check=False,
+    )
+    if result.returncode != 0:
+        sys.stderr.write(
+            f"[git-wtsm] command failed ({result.returncode}): {' '.join(cmd)}\n"
+            f"{result.stderr}\n"
+        )
+        sys.exit(result.returncode)
+    return result
+
+def assert_git_repo() -> None:
+    """Abort if current directory is not the top-level of a Git work-tree."""
+    cp = safe_run("git rev-parse --is-inside-work-tree", capture=True)
+    assert cp.stdout.strip() == "true", "Not inside a git repository"
+
+def get_submodules() -> list[str]:
+    """Return a list of all submodule paths (recursive)."""
+    cp = safe_run("git submodule status --recursive", capture=True)
+    return [line.split()[1] for line in cp.stdout.splitlines() if line.strip()]
+
+def get_worktrees() -> list[dict[str, str]]:
+    """Return list of worktree info dicts with path, branch, etc."""
+    cp = safe_run("git worktree list --porcelain", capture=True)
+    worktrees = []
+    current = {}
+    for line in cp.stdout.splitlines():
+        if line.startswith("worktree "):
+            current["path"] = line[9:]
+        elif line.startswith("branch "):
+            current["branch"] = line[7:]
+        elif line.startswith("HEAD "):
+            current["head"] = line[5:]
+        elif line == "" and current:
+            worktrees.append(current)
+            current = {}
+    if current:
+        worktrees.append(current)
+    return worktrees
+
+def get_submodule_status(worktree_path: pathlib.Path) -> tuple[int, int]:
+    """Return (clean_count, uncommitted_count) for submodules in worktree."""
+    submodules = get_submodules()
+    clean, uncommitted = 0, 0
+    for submod in submodules:
+        submod_path = worktree_path / submod
+        if submod_path.exists():
+            cp = safe_run("git status --porcelain", cwd=submod_path, capture=True)
+            if cp.stdout.strip():
+                uncommitted += 1
+            else:
+                clean += 1
+    return clean, uncommitted
+
+def format_submodule_summary(clean: int, uncommitted: int) -> str:
+    """Format submodule status summary for default output."""
+    total = clean + uncommitted
+    if total == 0:
+        return ""
+    parts = []
+    if clean > 0:
+        parts.append(f"{clean} clean")
+    if uncommitted > 0:
+        parts.append(f"{uncommitted} uncommitted")
+    return f" ({total} submodules: {', '.join(parts)})"
+
+def assert_clean_state() -> None:
+    """Abort if the main repo has uncommitted changes."""
+    cp = safe_run("git status --porcelain", capture=True)
+    assert not cp.stdout.strip(), "Main repository has uncommitted changes"
+
+def check_worktree_safety(path: pathlib.Path) -> None:
+    """Abort if [path] or any submodule has uncommitted changes."""
+    paths = [path] + [pathlib.Path(s) for s in get_submodules()]
+    for p in paths:
+        cp = safe_run("git status --porcelain", cwd=p, capture=True)
+        assert not cp.stdout.strip(), f"Uncommitted changes in {p}"
+
+def confirm_force_removal() -> None:
+    """Prompt user to type 'yes' to confirm force removal."""
+    resp = input("Type 'yes' to confirm: ")
+    if resp.strip().lower() != "yes":
+        print("Aborted by user.")
+        sys.exit(1)
+
+def init_submodules_recursive(worktree_path: pathlib.Path) -> None:
+    """Initialize and update submodules recursively in worktree."""
+    submodules = get_submodules()
+    if submodules:
+        print(f"Initializing {len(submodules)} submodules recursively...")
+        safe_run("git submodule update --init --recursive", 
+                cwd=worktree_path, capture=False)
+
+def cmd_add(path: pathlib.Path, branch: str | None) -> None:
+    """Add a new worktree at [path], optionally on [branch]."""
+    args = ["git", "worktree", "add"]
+    if branch:
+        args += ["-b", branch]
+    args.append(str(path))
+    safe_run(args, capture=False)
+    print(f"Worktree added at {path}")
+    
+    # Initialize submodules according to gitlink information
+    init_submodules_recursive(path)
+
+def cmd_remove(path: pathlib.Path, force: bool) -> None:
+    """Remove a worktree at [path], with optional force."""
+    if force:
+        confirm_force_removal()
+        args = ["git", "worktree", "remove", "--force", str(path)]
+    else:
+        args = ["git", "worktree", "remove", str(path)]
+    safe_run(args, capture=False)
+    print(f"Worktree removed at {path}")
+
+def cmd_list(verbose: bool, porcelain: bool, expire: str | None) -> None:
+    """List worktrees with submodule information."""
+    if porcelain:
+        args = ["git", "worktree", "list", "--porcelain"]
+        if expire:
+            args += ["--expire", expire]
+        safe_run(args, capture=False)
+        return
+    
+    worktrees = get_worktrees()
+    for wt in worktrees:
+        path = pathlib.Path(wt["path"])
+        branch = wt.get("branch", "")
+        if not branch and "head" in wt:
+            branch = wt["head"][:8]
+        clean, uncommitted = get_submodule_status(path)
+        
+        line = f"{path}"
+        if branch:
+            if branch.startswith("refs/heads/"):
+                branch = branch[11:]  # Remove refs/heads/ prefix
+            line += f" [{branch}]"
+        line += format_submodule_summary(clean, uncommitted)
+        print(line)
+
+def cmd_status() -> None:
+    """Show status of all worktrees and submodules."""
+    print("Worktrees:")
+    safe_run("git worktree list", capture=False)
+    print("\nSubmodules:")
+    safe_run("git submodule status --recursive", capture=False)
+
+def cmd_help() -> None:
+    """Print help message."""
+    print(textwrap.dedent("""
+        git-wtsm: Git worktree/submodule manager
+
+        Usage:
+          git-wtsm add <path> [branch]
+          git-wtsm remove <path> [-f|--force]
+          git-wtsm list [--verbose] [--porcelain] [--expire <time>]
+          git-wtsm status
+          git-wtsm help
+
+        See --help for each subcommand for details.
+    """).strip())
+
+def parse_args() -> argparse.Namespace:
+    p = argparse.ArgumentParser(prog="git-wtsm", add_help=False)
+    sub = p.add_subparsers(dest="cmd", required=False)
+
+    common = dict(add_help=False)
+    # add
+    add_p = sub.add_parser("add", **common)
+    add_p.add_argument("path", type=pathlib.Path)
+    add_p.add_argument("branch", nargs="?", default=None)
+    add_p.add_argument("-h", "--help", action="help")
+
+    # remove
+    rm_p = sub.add_parser("remove", **common)
+    rm_p.add_argument("path", type=pathlib.Path)
+    rm_p.add_argument("-f", "--force", action="store_true")
+    rm_p.add_argument("-h", "--help", action="help")
+
+    # list
+    list_p = sub.add_parser("list", **common)
+    list_p.add_argument("--verbose", action="store_true")
+    list_p.add_argument("--porcelain", action="store_true")
+    list_p.add_argument("--expire")
+    list_p.add_argument("-h", "--help", action="help")
+
+    # status
+    sub.add_parser("status", **common).add_argument("-h", "--help", action="help")
+
+    # help
+    sub.add_parser("help", **common)
+
+    return p.parse_args()
+
+def main() -> None:
+    args = parse_args()
+    if args.cmd == "help" or args.cmd is None:
+        cmd_help()
+        return
+
+    assert_git_repo()
+
+    if args.cmd == "add":
+        assert_clean_state()
+        cmd_add(args.path, args.branch)
+    elif args.cmd == "remove":
+        assert_clean_state()
+        cmd_remove(args.path, args.force)
+    elif args.cmd == "list":
+        cmd_list(args.verbose, args.porcelain, args.expire)
+    elif args.cmd == "status":
+        cmd_status()
+    else:
+        cmd_help()
+
+if __name__ == "__main__":
+    main()
