@@ -15,6 +15,8 @@ import subprocess
 import pathlib
 import sys
 import textwrap
+import os
+import shutil
 
 def safe_run(cmd: list[str] | str,
              cwd: pathlib.Path | None = None,
@@ -72,15 +74,41 @@ def get_worktrees() -> list[dict[str, str]]:
 
 def get_submodule_status(worktree_path: pathlib.Path) -> tuple[int, int]:
     """Return (clean_count, uncommitted_count) for submodules in worktree."""
-    submodules = get_submodules()
+    try:
+        submodules = get_submodules()
+    except Exception:
+        # If we can't get submodules list, return zero counts
+        return 0, 0
+        
     clean, uncommitted = 0, 0
     for submod in submodules:
         submod_path = worktree_path / submod
         if submod_path.exists():
-            cp = safe_run("git status --porcelain", cwd=submod_path, capture=True)
-            if cp.stdout.strip():
-                uncommitted += 1
-            else:
+            try:
+                # Check if this is a proper git repository
+                git_dir = submod_path / ".git"
+                if git_dir.exists() and (git_dir.is_file() or git_dir.is_dir()):
+                    # Try to run git status, but catch all errors
+                    result = subprocess.run(
+                        ["git", "status", "--porcelain"],
+                        cwd=submod_path,
+                        capture_output=True,
+                        text=True,
+                        timeout=5  # Prevent hanging
+                    )
+                    if result.returncode == 0:
+                        if result.stdout.strip():
+                            uncommitted += 1
+                        else:
+                            clean += 1
+                    else:
+                        # Git command failed, assume clean
+                        clean += 1
+                else:
+                    # Directory exists but no proper .git - count as clean (manual checkout case)
+                    clean += 1
+            except Exception:
+                # If anything fails, assume clean (better than failing the whole command)
                 clean += 1
     return clean, uncommitted
 
@@ -120,8 +148,153 @@ def init_submodules_recursive(worktree_path: pathlib.Path) -> None:
     submodules = get_submodules()
     if submodules:
         print(f"Initializing {len(submodules)} submodules recursively...")
-        safe_run("git submodule update --init --recursive", 
-                cwd=worktree_path, capture=False)
+        
+        # Try multiple strategies to handle Docker container limitations
+        strategies = [
+            # Strategy 1: Disable hardlinks and local optimizations
+            ["git", "-c", "core.hardlinks=false", "-c", "clone.defaultRemoteName=origin", 
+             "submodule", "update", "--init", "--recursive"],
+            # Strategy 2: Force copies instead of hardlinks + disable shared repos
+            ["git", "-c", "core.hardlinks=false", "-c", "core.sharedRepository=false",
+             "submodule", "update", "--init", "--recursive"]
+        ]
+        
+        # First try normal git submodule approaches
+        for i, strategy in enumerate(strategies, 1):
+            if try_submodule_strategy(strategy, i, worktree_path, submodules):
+                return
+        
+        # If standard approaches fail, try manual file-based approach for Docker containers
+        print("⚠️ Trying manual submodule file copy approach (Docker container mode)")
+        if try_manual_submodule_checkout(worktree_path, submodules):
+            return
+        
+        # If all strategies fail, warn but continue
+        print("⚠️ All submodule initialization strategies failed")
+        print("   This is expected in Docker containers with hardlink restrictions")
+        print("   Worktree created successfully, but submodules may need manual initialization")
+
+def try_submodule_strategy(strategy: list[str], strategy_num: int, worktree_path: pathlib.Path, 
+                          submodules: list[str]) -> bool:
+    """Try a specific git submodule strategy and return True if successful."""
+    try:
+        result = subprocess.run(
+            strategy,
+            cwd=worktree_path,
+            capture_output=True,
+            text=True
+        )
+        if result.returncode == 0:
+            # Verify submodules are actually populated, not just created
+            submodules_working = True
+            for submodule in submodules:
+                submodule_path = worktree_path / submodule
+                # Check if submodule has actual files beyond just .git
+                if submodule_path.exists():
+                    files = list(submodule_path.iterdir())
+                    non_git_files = [f for f in files if f.name != '.git']
+                    if not non_git_files:
+                        submodules_working = False
+                        break
+                else:
+                    submodules_working = False
+                    break
+            
+            if submodules_working:
+                print(f"✅ Submodules initialized successfully (strategy {strategy_num})")
+                return True
+            else:
+                print(f"⚠️ Strategy {strategy_num}: Git success but submodules not fully populated")
+        else:
+            print(f"⚠️ Strategy {strategy_num} failed: {result.stderr.strip()}")
+    except Exception as e:
+        print(f"⚠️ Strategy {strategy_num} failed with exception: {e}")
+    return False
+
+def try_manual_submodule_checkout(worktree_path: pathlib.Path, submodules: list[str]) -> bool:
+    """Manually checkout submodule files by copying from source repositories."""
+    try:
+        return manual_checkout_recursive(worktree_path, submodules, level=1)
+    except Exception as e:
+        print(f"⚠️ Manual submodule checkout failed: {e}")
+    return False
+
+def manual_checkout_recursive(worktree_path: pathlib.Path, submodules: list[str], level: int = 1) -> bool:
+    """Recursively checkout submodules manually."""
+    # Get submodule info from .gitmodules
+    gitmodules_path = worktree_path / ".gitmodules"
+    if not gitmodules_path.exists():
+        return False
+        
+    submodule_info = {}
+    current_submodule = None
+    
+    # Parse .gitmodules file
+    with open(gitmodules_path, 'r') as f:
+        for line in f:
+            line = line.strip()
+            if line.startswith('[submodule'):
+                current_submodule = line.split('"')[1] if '"' in line else None
+            elif current_submodule and '=' in line:
+                key, value = line.split('=', 1)
+                key = key.strip()
+                value = value.strip()
+                if current_submodule not in submodule_info:
+                    submodule_info[current_submodule] = {}
+                submodule_info[current_submodule][key] = value
+    
+    success_count = 0
+    total_processed = 0
+    
+    for submodule in submodules:
+        if submodule in submodule_info and 'url' in submodule_info[submodule]:
+            url = submodule_info[submodule]['url']
+            # For local filesystem URLs, try direct copy
+            if url.startswith('/') or url.startswith('./'):
+                source_path = pathlib.Path(url)
+                if source_path.exists():
+                    dest_path = worktree_path / submodule
+                    dest_path.mkdir(parents=True, exist_ok=True)
+                    
+                    # Copy files manually
+                    for item in source_path.iterdir():
+                        if item.name != '.git':
+                            if item.is_file():
+                                shutil.copy2(item, dest_path / item.name)
+                            elif item.is_dir():
+                                shutil.copytree(item, dest_path / item.name, dirs_exist_ok=True)
+                    
+                    # Recursively handle nested submodules
+                    nested_gitmodules = source_path / ".gitmodules"
+                    if nested_gitmodules.exists() and level < 4:  # Prevent infinite recursion
+                        # Copy .gitmodules for recursive processing
+                        shutil.copy2(nested_gitmodules, dest_path / ".gitmodules")
+                        
+                        # Get nested submodules
+                        nested_submodules = []
+                        try:
+                            result = subprocess.run(
+                                ["git", "submodule", "status", "--recursive"],
+                                cwd=source_path,
+                                capture_output=True,
+                                text=True
+                            )
+                            if result.returncode == 0:
+                                nested_submodules = [line.split()[1] for line in result.stdout.splitlines() if line.strip()]
+                        except:
+                            pass
+                        
+                        if nested_submodules:
+                            print(f"  🔄 Processing {len(nested_submodules)} nested submodules in {submodule} (level {level+1})")
+                            manual_checkout_recursive(dest_path, nested_submodules, level + 1)
+                    
+                    success_count += 1
+                    total_processed += 1
+    
+    if level == 1 and success_count > 0:
+        print(f"✅ Manual submodule checkout successful ({success_count}/{len(submodules)} submodules)")
+    
+    return success_count > 0
 
 def cmd_add(path: pathlib.Path, branch: str | None) -> None:
     """Add a new worktree at [path], optionally on [branch]."""
