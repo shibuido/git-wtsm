@@ -19,10 +19,12 @@ RUN addgroup -g 1000 testuser && \
 USER testuser
 WORKDIR /home/testuser
 
-# Configure git for testuser
+# Configure git for testuser - disable hardlinks to avoid container issues
 RUN git config --global user.name "Test User" \
     && git config --global user.email "test@example.com" \
-    && git config --global init.defaultBranch main
+    && git config --global init.defaultBranch main \
+    && git config --global protocol.file.allow always \
+    && git config --global core.hardlinks false
 
 # Setup stage - Create test repositories (cached)
 FROM base AS setup
