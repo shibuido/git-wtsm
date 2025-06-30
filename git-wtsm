@@ -51,6 +51,51 @@ def get_submodules() -> list[str]:
     cp = safe_run("git submodule status --recursive", capture=True)
     return [line.split()[1] for line in cp.stdout.splitlines() if line.strip()]
 
+def get_worktrees() -> list[dict[str, str]]:
+    """Return list of worktree info dicts with path, branch, etc."""
+    cp = safe_run("git worktree list --porcelain", capture=True)
+    worktrees = []
+    current = {}
+    for line in cp.stdout.splitlines():
+        if line.startswith("worktree "):
+            current["path"] = line[9:]
+        elif line.startswith("branch "):
+            current["branch"] = line[7:]
+        elif line.startswith("HEAD "):
+            current["head"] = line[5:]
+        elif line == "" and current:
+            worktrees.append(current)
+            current = {}
+    if current:
+        worktrees.append(current)
+    return worktrees
+
+def get_submodule_status(worktree_path: pathlib.Path) -> tuple[int, int]:
+    """Return (clean_count, uncommitted_count) for submodules in worktree."""
+    submodules = get_submodules()
+    clean, uncommitted = 0, 0
+    for submod in submodules:
+        submod_path = worktree_path / submod
+        if submod_path.exists():
+            cp = safe_run("git status --porcelain", cwd=submod_path, capture=True)
+            if cp.stdout.strip():
+                uncommitted += 1
+            else:
+                clean += 1
+    return clean, uncommitted
+
+def format_submodule_summary(clean: int, uncommitted: int) -> str:
+    """Format submodule status summary for default output."""
+    total = clean + uncommitted
+    if total == 0:
+        return ""
+    parts = []
+    if clean > 0:
+        parts.append(f"{clean} clean")
+    if uncommitted > 0:
+        parts.append(f"{uncommitted} uncommitted")
+    return f" ({total} submodules: {', '.join(parts)})"
+
 def assert_clean_state() -> None:
     """Abort if the main repo has uncommitted changes."""
     cp = safe_run("git status --porcelain", capture=True)
@@ -89,6 +134,31 @@ def cmd_remove(path: pathlib.Path, force: bool) -> None:
     safe_run(args, capture=False)
     print(f"Worktree removed at {path}")
 
+def cmd_list(verbose: bool, porcelain: bool, expire: str | None) -> None:
+    """List worktrees with submodule information."""
+    if porcelain:
+        args = ["git", "worktree", "list", "--porcelain"]
+        if expire:
+            args += ["--expire", expire]
+        safe_run(args, capture=False)
+        return
+    
+    worktrees = get_worktrees()
+    for wt in worktrees:
+        path = pathlib.Path(wt["path"])
+        branch = wt.get("branch", "")
+        if not branch and "head" in wt:
+            branch = wt["head"][:8]
+        clean, uncommitted = get_submodule_status(path)
+        
+        line = f"{path}"
+        if branch:
+            if branch.startswith("refs/heads/"):
+                branch = branch[11:]  # Remove refs/heads/ prefix
+            line += f" [{branch}]"
+        line += format_submodule_summary(clean, uncommitted)
+        print(line)
+
 def cmd_status() -> None:
     """Show status of all worktrees and submodules."""
     print("Worktrees:")
@@ -104,6 +174,7 @@ def cmd_help() -> None:
         Usage:
           git-wtsm add <path> [branch]
           git-wtsm remove <path> [-f|--force]
+          git-wtsm list [--verbose] [--porcelain] [--expire <time>]
           git-wtsm status
           git-wtsm help
 
@@ -112,7 +183,7 @@ def cmd_help() -> None:
 
 def parse_args() -> argparse.Namespace:
     p = argparse.ArgumentParser(prog="git-wtsm", add_help=False)
-    sub = p.add_subparsers(dest="cmd", required=True)
+    sub = p.add_subparsers(dest="cmd", required=False)
 
     common = dict(add_help=False)
     # add
@@ -127,6 +198,13 @@ def parse_args() -> argparse.Namespace:
     rm_p.add_argument("-f", "--force", action="store_true")
     rm_p.add_argument("-h", "--help", action="help")
 
+    # list
+    list_p = sub.add_parser("list", **common)
+    list_p.add_argument("--verbose", action="store_true")
+    list_p.add_argument("--porcelain", action="store_true")
+    list_p.add_argument("--expire")
+    list_p.add_argument("-h", "--help", action="help")
+
     # status
     sub.add_parser("status", **common).add_argument("-h", "--help", action="help")
 
@@ -137,7 +215,7 @@ def parse_args() -> argparse.Namespace:
 
 def main() -> None:
     args = parse_args()
-    if args.cmd == "help":
+    if args.cmd == "help" or args.cmd is None:
         cmd_help()
         return
 
@@ -149,6 +227,8 @@ def main() -> None:
     elif args.cmd == "remove":
         assert_clean_state()
         cmd_remove(args.path, args.force)
+    elif args.cmd == "list":
+        cmd_list(args.verbose, args.porcelain, args.expire)
     elif args.cmd == "status":
         cmd_status()
     else:
