@@ -16,9 +16,46 @@ class EdgeCasesAndErrorTests(unittest.TestCase):
     
     def setUp(self):
         """Set up test environment."""
-        self.clean_repo = pathlib.Path("/home/testuser/test-repos/scenarios/clean-main-repo")
-        self.dirty_repo = pathlib.Path("/home/testuser/test-repos/scenarios/dirty-main-repo") 
         self.original_dir = pathlib.Path.cwd()
+        
+        # Try multiple paths for test repositories to handle Docker filesystem issues
+        potential_repos = [
+            pathlib.Path("/home/testuser/test-repos/scenarios/simple-repo"),
+            pathlib.Path("/home/testuser/test-repos/scenarios/simple-branch-repo"),
+            pathlib.Path("/home/testuser/test-repos/scenarios/clean-main-repo"),
+        ]
+        
+        self.clean_repo = None
+        self.dirty_repo = pathlib.Path("/home/testuser/test-repos/scenarios/dirty-main-repo")
+        
+        # Find any available repository
+        for repo_path in potential_repos:
+            if repo_path.exists() and (repo_path / ".git").exists():
+                self.clean_repo = repo_path
+                break
+        
+        if self.clean_repo is None:
+            # If no scenarios work, create a minimal test repository
+            test_base = pathlib.Path("/home/testuser/test-repos")
+            if test_base.exists():
+                # Create a simple test repo on the fly
+                temp_repo = test_base / "temp-test-repo"
+                temp_repo.mkdir(exist_ok=True)
+                
+                # Initialize git repo
+                subprocess.run(["git", "init"], cwd=temp_repo, capture_output=True)
+                subprocess.run(["git", "config", "user.name", "Test"], cwd=temp_repo, capture_output=True)
+                subprocess.run(["git", "config", "user.email", "test@example.com"], cwd=temp_repo, capture_output=True)
+                
+                # Create and commit a file
+                (temp_repo / "test.txt").write_text("test content")
+                subprocess.run(["git", "add", "test.txt"], cwd=temp_repo, capture_output=True)
+                subprocess.run(["git", "commit", "-m", "Initial commit"], cwd=temp_repo, capture_output=True)
+                
+                self.clean_repo = temp_repo
+                print(f"🔧 Created temporary test repository: {temp_repo}")
+            else:
+                self.skipTest("No test repositories available and cannot create temporary repo")
         
         # Start in clean repo by default
         os.chdir(self.clean_repo)
@@ -58,13 +95,19 @@ class EdgeCasesAndErrorTests(unittest.TestCase):
         
     def test_dirty_repository_safety(self):
         """Test that dirty repository prevents operations."""
-        os.chdir(self.dirty_repo)
+        # Create dirty state in current repository
+        dirty_file = self.clean_repo / "uncommitted.txt"
+        dirty_file.write_text("Uncommitted changes")
         
-        test_worktree = self.dirty_repo.parent / "test-error-wt"
+        test_worktree = self.clean_repo.parent / "test-error-wt"
         
         # Should fail due to uncommitted changes
         result = self.run_git_wtsm(["add", str(test_worktree)])
         self.assertNotEqual(result.returncode, 0, "Should fail with dirty repository")
+        
+        # Clean up
+        if dirty_file.exists():
+            dirty_file.unlink()
         
     def test_non_git_repository(self):
         """Test behavior in non-git directory."""
