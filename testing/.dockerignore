@@ -1,0 +1,34 @@
+# Exclude unnecessary files from Docker build context
+.git
+.gitignore
+README.md
+git-wtsm.README.md
+CLAUDE.md
+
+# But include the git-wtsm script
+!git-wtsm
+
+# Python cache
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.Python
+*.so
+
+# IDE files
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# OS files
+.DS_Store
+Thumbs.db
+
+# Logs
+*.log
+
+# Temporary files
+*.tmp
+*.temp

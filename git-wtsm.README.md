@@ -178,6 +178,43 @@ This tool is part of the [shibuido](https://github.com/shibuido) organization's 
 - Platform-specific improvements
 - Documentation enhancements
 
+## Contributors
+
+### Testing
+
+git-wtsm includes a comprehensive Docker-based testing infrastructure for reliable, isolated testing:
+
+**Testing Infrastructure:**
+- **Multi-stage Docker build** with optimized caching
+- **4 test suites** covering basic functionality, submodule handling, list features, and edge cases  
+- **Automated test execution** with colored reporting and exit codes
+- **Test repository creation** with realistic submodule hierarchies
+
+**Running Tests:**
+```bash
+# Build testing environment
+cd testing && ./docker-build.sh
+
+# Run all tests
+./docker-test.sh
+
+# Run specific test
+./docker-test.sh --test git-wtsm-test-01
+
+# Interactive debugging
+./docker-test.sh --interactive
+```
+
+**Test Coverage:**
+- **git-wtsm-test-01.py**: Basic commands (help, status, add, remove, list)
+- **git-wtsm-test-02.py**: Submodule initialization and recursive handling
+- **git-wtsm-test-03.py**: List command with --verbose, --porcelain flags
+- **git-wtsm-test-04.py**: Edge cases, error handling, and safety features
+
+**CI/CD Ready:** The Docker testing infrastructure is designed for easy integration with GitHub Actions and other CI systems.
+
+See `testing/README.md` for detailed testing documentation and development guidelines.
+
 ## License
 
 MIT License - see the repository for full license text.
